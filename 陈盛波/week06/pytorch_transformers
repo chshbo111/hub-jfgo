@@ -1,0 +1,121 @@
+#coding:utf8
+
+import torch
+import torch.nn as nn
+import numpy as np
+from transformers import BertTokenizer
+
+"""
+用pytorch实现transformer层
+"""
+
+class DiyTransformersModel(nn.Module):
+    def __init__(self, vocab_size):
+        super(DiyTransformersModel, self).__init__()
+        self.num_attention_heads = 12
+        self.hidden_size = 768
+        self.num_layers = 6  # 训练层数
+        # embedding
+        self.token_embedding = nn.Embedding(vocab_size, self.hidden_size, padding_idx=0)
+        self.segment_embedding = nn.Embedding(2, self.hidden_size)
+        self.position_embedding = nn.Embedding(512, self.hidden_size)
+        self.embedding_layer_norm = nn.LayerNorm(self.hidden_size)
+        # self_attention
+        self.w_q = nn.Linear(self.hidden_size, self.hidden_size)
+        self.w_k = nn.Linear(self.hidden_size, self.hidden_size)
+        self.w_v = nn.Linear(self.hidden_size, self.hidden_size)
+        self.soft_max = nn.functional.softmax
+        self.attention_linear = nn.Linear(self.hidden_size, self.hidden_size)
+        self.attention_layer_norm = nn.LayerNorm(self.hidden_size)
+        # feed_forward
+        self.feed_forward_first_linear = nn.Linear(self.hidden_size, 4 * self.hidden_size)
+        self.gelu = nn.functional.gelu
+        self.feed_forward_second_linear = nn.Linear(4 * self.hidden_size, self.hidden_size)
+        self.feed_forward_layer_norm = nn.LayerNorm(self.hidden_size)
+
+    def embedding_forward(self, sentence):
+        # 三个embedding层
+        token = tokenizer.encode(sentence)
+        seg = np.array([0] * len(token))
+        pos = np.array(list(range(len(token))))
+        tensor_token = torch.LongTensor(token)
+        tensor_seg = torch.LongTensor(seg)
+        tensor_pos = torch.LongTensor(pos)  
+        te = self.token_embedding(tensor_token)
+        se = self.segment_embedding(tensor_seg)
+        pe = self.position_embedding(tensor_pos)
+        # 加和后过一个归一化层
+        embedding = te + se + pe
+        embedding = self.embedding_layer_norm(embedding)
+        return embedding
+    
+    #执行全部的transformer层计算
+    def all_transformer_layer_forward(self, x):
+        for i in range(self.num_layers):
+            x = self.single_transformer_layer_forward(x)
+        return x
+    
+    def single_transformer_layer_forward(self, x):
+        attention_output = self.self_attention(x)
+        feed_output = self.feed_forward(attention_output)
+        return feed_output
+
+
+    def self_attention(self, x):
+        q = self.w_q(x)
+        k = self.w_k(x)
+        v = self.w_v(x)
+        # 计算头部数量
+        attention_head_size = int(self.hidden_size / self.num_attention_heads)
+        # 将Q、V和K切分
+        q = self.transpose_for_scores(q, attention_head_size, self.num_attention_heads)
+        k = self.transpose_for_scores(k, attention_head_size, self.num_attention_heads)
+        v = self.transpose_for_scores(v, attention_head_size, self.num_attention_heads)
+        # 批量处理
+        # Q*K.T / 根号dk
+        qk = torch.matmul(q, k.transpose(-2, -1))
+        sqrt_dk = np.sqrt(attention_head_size)
+        qk /= sqrt_dk
+        # 过softmax激活函数
+        qk = self.soft_max(qk, dim=-1)
+        qkv = torch.matmul(qk, v)
+        qkv = qkv.swapaxes(0, 1).reshape(-1, self.hidden_size)
+        # 过一个线性层
+        x_attention = self.attention_linear(qkv)
+        # 残差机制：与embedding的输出相加后过一层归一化层
+        attention_output = self.attention_layer_norm(x+x_attention)
+        return attention_output
+    
+    #多头机制
+    def transpose_for_scores(self, x, attention_head_size, num_attention_heads):
+        # hidden_size = 768  num_attent_heads = 12 attention_head_size = 64
+        max_len, hidden_size = x.shape
+        x = x.reshape(max_len, num_attention_heads, attention_head_size)
+        x = x.swapaxes(1, 0)  # output shape = [num_attention_heads, max_len, attention_head_size]
+        return x
+    
+    def feed_forward(self, attention_output):
+        # 过第一个线性层 h*4h
+        feed_output = self.feed_forward_first_linear(attention_output)
+        # 过激活函数gelu
+        feed_output = self.gelu(feed_output)
+        # 过第二个线性层4h*h
+        feed_output = self.feed_forward_second_linear(feed_output)
+        # 残差机制：与attention的输出相加后过一层归一化层
+        feed_output = self.feed_forward_layer_norm(feed_output+attention_output)
+        return feed_output
+
+    def forward(self, x):
+        x = self.embedding_forward(x)
+        # print(x)
+        # self_attention
+        sequence_output = self.all_transformer_layer_forward(x)
+        return sequence_output
+
+if __name__ == "__main__":
+    tokenizer = BertTokenizer.from_pretrained(r"D:\nlpcodes\bert-base-chinese")
+    string = "今天天气真不错"
+    vocab_size = tokenizer.vocab_size
+    model = DiyTransformersModel(vocab_size)
+    sequence_output = model.forward(string)
+    print(sequence_output)
